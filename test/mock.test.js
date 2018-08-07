@@ -7,7 +7,7 @@ var id = ObjectID();
 MongoClient.persist = "mongo.js";
 
 // this number is used in all the query/find tests, so it's easier to add more docs
-var EXPECTED_TOTAL_TEST_DOCS = 11;
+var EXPECTED_TOTAL_TEST_DOCS = 12;
 
 describe('mock tests', function () {
   var connected_db;
@@ -19,6 +19,9 @@ describe('mock tests', function () {
       collection = connected_db.collection("users");
       done();
     });
+  });
+  after(function(done) {
+    connected_db.close().then(done).catch(done)
   });
 
 
@@ -45,6 +48,25 @@ describe('mock tests', function () {
             var instance = _.find(items, {name:dropCollectionName} );
             (instance === undefined).should.be.true;
             done();
+          });
+        });
+      });
+    });
+    it('should load another db', function (done) {
+      var otherCollectionName = 'someOtherCollection';
+      var otherDb = connected_db.db('some_other_mock_database');
+      otherDb.createCollection(otherCollectionName, function (err, otherCollection) {
+        if(err) return done(err);
+        connected_db.listCollections().toArray(function(err, mainCollections) {
+          if(err) return done(err);
+          otherDb.listCollections().toArray(function(err, otherCollections) {
+            // otherDb should have a separate list of collections
+            if(err) return done(err);
+            var otherInstance = _.find(otherCollections, {name:otherCollectionName} );
+            otherInstance.should.not.be.undefined;
+            var mainInstance = _.find(mainCollections, {name:otherCollectionName} );
+            (mainInstance === undefined).should.be.true;
+            otherDb.close().then(done).catch(done);
           });
         });
       });
@@ -104,7 +126,7 @@ describe('mock tests', function () {
         if(err) return done(err);
         collection.indexInformation({full:true}, function (err, indexes) {
           if(err) return done(err);
-          var index = _.where(indexes, {name: 'test_nonunique_default_1'})[0];
+          var index = _.filter(indexes, {name: 'test_nonunique_default_1'})[0];
           index.unique.should.be.false;
           done();
         });
@@ -132,7 +154,7 @@ describe('mock tests', function () {
 });
 
   describe('collections', function () {
-    'drop,insert,findOne,findOneAndUpdate,update,updateOne,updateMany,remove,deleteOne,deleteMany'.split(',').forEach(function(key) {
+    'drop,insert,findOne,findOneAndUpdate,update,updateOne,updateMany,remove,deleteOne,deleteMany,save'.split(',').forEach(function(key) {
       it("should have a '"+key+"' function", function () {
         collection.should.have.property(key);
         collection[key].should.be.type('function');
@@ -174,14 +196,20 @@ describe('mock tests', function () {
         done();
       });
     });
-    it('should return only the fields specified', function (done) {
-      collection.findOne({test:456}, {foo:1}, function (err, doc) {
-        if(err) return done(err);
+    it('should return only the fields specified by field projection', () =>
+      collection.findOne({test:456}, {projection: {foo:1}})
+      .then(doc => {
         (!!doc).should.be.true;
-        doc.should.eql({foo:true});
-        done();
-      });
-    });
+        Object.keys(doc).should.eql(['foo', '_id']);
+      })
+    );
+    it('should return only the fields specified', () =>
+      collection.findOne({test:456}, {foo:1})
+      .then(doc => {
+        (!!doc).should.be.true;
+        Object.keys(doc).should.eql(['foo', '_id']);
+      })
+    );
     it('should accept undefined fields', function (done) {
       collection.findOne({test:456}, undefined, function (err, doc) {
         if(err) return done(err);
@@ -230,6 +258,23 @@ describe('mock tests', function () {
           if(err) return done(err);
           (!!doc).should.be.true;
           doc.should.have.property("foo", "buzz");
+          done();
+        });
+      });
+    });
+
+    it('should update one (findOneAndUpdate)', function (done) {
+      //query, data, options, callback
+      collection.findOneAndUpdate({test:123}, {$set:{foo:"john"}}, function (err, opResult) {
+        if(err) return done(err);
+        opResult.should.have.properties("ok", "lastErrorObject", "value");
+        opResult.ok.should.equal(1);
+        opResult.value.should.have.property("foo", "john");
+
+        collection.findOne({test:123}, function (err, doc) {
+          if(err) return done(err);
+          (!!doc).should.be.true;
+          doc.should.have.property("foo", "john");
           done();
         });
       });
@@ -300,6 +345,25 @@ describe('mock tests', function () {
         });
       });
     });
+    it('should $unset', function (done) {
+      var original = { test: 237, parent0 :999, parent1 :{ child1 :111, child2 :222, child3 :333, child4 :{ child5 :555}}};
+      var expected = '{"test":237,"parent1":{"child1":111,"child3":333,"child4":{}}}';
+
+      collection.insert(original)
+      .then(r1 =>
+        collection.update({test: 237}, {$unset: { "parent0": 1, "parent1.child2": 1, "parent1.child4.child5": 1 }})
+        .then(r2 =>
+          collection.findOne({test: 237})
+          .then(doc => {
+            let copy = _.clone(doc);
+            delete copy._id;
+            JSON.stringify(copy).should.eql(expected);
+          })
+        )
+      )
+      .then(done)
+      .catch(done)
+    });
     it('should upsert', function (done) {
       //prove it isn't there...
       collection.findOne({test:1}, function (err, doc) {
@@ -324,11 +388,47 @@ describe('mock tests', function () {
         if(err) return done(err);
         (!!doc).should.be.false;
 
-        collection.updateMany({upsertMany:1}, {upsertMany:1,bar:"none"}, {upsert:true}, function (err, opResult) {
+        collection.updateMany({upsertMany:1}, { $set:{upsertMany:1,bar:"none"} }, {upsert:true}, function (err, opResult) {
           if(err) return done(err);
           opResult.result.n.should.equal(1);
 
           collection.find({upsertMany:1}).count(function (err, n) {
+            if(err) return done(err);
+            n.should.equal(1);
+            done();
+          });
+        });
+      });
+    });
+    it('should save (no _id)', function (done) {
+      //prove it isn't there...
+      collection.findOne({test:2}, function (err, doc) {
+        if(err) return done(err);
+        (!!doc).should.be.false;
+
+        collection.save({test:2,bar:"none"}, function (err, result) {
+          if(err) return done(err);
+          result.n.should.equal(1);
+
+          collection.find({test:2}).count(function (err, n) {
+            if(err) return done(err);
+            n.should.equal(1);
+            done();
+          });
+        });
+      });
+    });
+    it('should save (with _id)', function (done) {
+      //prove it isn't there...
+      collection.findOne({test:2}, function (err, doc) {
+        if(err) return done(err);
+        (!doc).should.be.false;
+
+        collection.save({_id: doc._id,test:3,bar:"none"}, function (err, result) {
+          if(err) return done(err);
+          result.n.should.equal(1);
+
+          collection.find({test:3}).count(function (err, n) {
             if(err) return done(err);
             n.should.equal(1);
             done();
@@ -484,18 +584,6 @@ describe('mock tests', function () {
         });
       });
     });
-    it('should push item into array that does not yet exist on the doc (with an upsert)', function (done) {
-      collection.update({test:789}, { $set: {test: 789}, $push:{ newPushTest: {$each: [ 2 ]} }}, {upsert: true}, function (err, result) {
-        if (err) done(err);
-        result.n.should.equal(1);
-        collection.findOne({test: 789}, function (err, doc) {
-          if (err) done(err);
-          doc.newPushTest.should.have.length(1);
-          doc.newPushTest.should.containEql(2);
-          done();
-        });
-      });
-    });
     it('should push item into array + $slice', function (done) {
       collection.update({test:333}, { $set: {pushTest: []}}, function (err, result) {
         if (err) done(err);
@@ -539,6 +627,123 @@ describe('mock tests', function () {
         });
       });
     });
+
+    it('should have bulk operations', function(done) {
+      collection.should.have.property('initializeOrderedBulkOp');
+      collection.should.have.property('initializeUnorderedBulkOp');
+
+      done();
+    });
+
+    it('should have bulk find', function(done) {
+      var bulk = collection.initializeOrderedBulkOp();
+      bulk.should.have.property('find');
+      done();
+    });
+
+    it('should have bulk upsert', function(done) {
+      var bulk = collection.initializeOrderedBulkOp();
+      var findOps = bulk.find({});
+
+      findOps.should.have.property('upsert');
+      done();
+    });
+
+    it('should bulk updateOne', function(done) {
+      var bulk = collection.initializeOrderedBulkOp();
+      bulk.find({test: {$exists: true}}).updateOne({
+        $set: {
+          bulkUpdate: true,
+        }
+      });
+      bulk.execute().then(() => {
+        collection.findOne({bulkUpdate: true})
+          .then((doc) => {
+            if (doc && doc.bulkUpdate) {
+              done();
+            } else {
+              done(new Error('Bulk operation did not updateOne'));
+            }
+          });
+      });
+    }).timeout(0);
+
+    it('should bulk update', function(done) {
+      var bulk = collection.initializeOrderedBulkOp();
+
+      bulk.find({test: {$exists: true}}).update({
+        $set: {
+          bulkUpdate: true,
+        }
+      });
+      bulk.execute().then(() => {
+        collection.find({bulkUpdate: true}).toArray()
+          .then((docs) => {
+            if (docs.every((val) => val.bulkUpdate)) {
+              done();
+            } else {
+              done(new Error('Bulk operation did not update'));
+            }
+          });
+      });
+    }).timeout(0);
+
+    it('should bulk insert', function(done) {
+      var bulk = collection.initializeOrderedBulkOp();
+
+      bulk.insert([{
+        test: 5353,
+        bulkTest: true,
+      }, {
+        test: 5454,
+        bulkTest: true,
+      }]);
+
+      bulk.execute().then(() => {
+        collection.findOne({test: 5353})
+          .then((doc) => {
+            if (doc.bulkTest) {
+              done();
+            } else {
+              done(new Error('Doc didn\'t get inserted'));
+            }
+          });
+      });
+    }).timeout(0);
+
+    it('should bulk removeOne', function(done) {
+      var bulk = collection.initializeOrderedBulkOp();
+
+      bulk.find({bulkTest: true}).removeOne();
+
+      bulk.execute().then(() => {
+        collection.findOne({test: 5353})
+          .then((doc) => {
+            if (doc) {
+              done(new Error('Doc didn\'t get removed'));
+            } else {
+              done();
+            }
+          });
+      });
+    }).timeout(0);
+
+    it('should bulk remove', function(done) {
+      var bulk = collection.initializeOrderedBulkOp();
+
+      bulk.find({bulkTest: true}).remove();
+
+      bulk.execute().then(() => {
+        collection.find({bulkTest: true}).toArray()
+          .then((docs) => {
+            if (docs.length > 0) {
+              done(new Error('Docs didn\'t get removed'));
+            } else {
+              done();
+            }
+          });
+      });
+    }).timeout(0);
   });
 
   describe('cursors', function() {
@@ -547,6 +752,30 @@ describe('mock tests', function () {
       crsr.should.have.property('count');
       crsr.count(function(err, cnt) {
         cnt.should.equal(EXPECTED_TOTAL_TEST_DOCS);
+        done();
+      });
+    });
+
+    it('should limit the fields in the documents using project', function (done) {
+      var crsr = collection.find({});
+      crsr.should.have.property('project');
+      crsr.project({ _id: 1 }).toArray(function(err, res) {
+        res.length.should.equal(EXPECTED_TOTAL_TEST_DOCS);
+        res.forEach(function(doc) {
+          Object.keys(doc).should.eql(['_id']);
+        });
+        done();
+      });
+    });
+
+    it('should remove property/properites from the documents', function (done) {
+      var crsr = collection.find({});
+      crsr.should.have.property('project');
+      crsr.project({ _id: 0, foo: 0 }).toArray(function(err, res) {
+        res.length.should.equal(EXPECTED_TOTAL_TEST_DOCS);
+        res.forEach(function(doc) {
+          doc.should.not.have.keys('_id', 'foo');
+        });
         done();
       });
     });
@@ -626,7 +855,12 @@ describe('mock tests', function () {
       crsr.should.have.property('sort');
       crsr.sort({test: 1}).toArray(function(err, res) {
         if (err) done(err);
-        var sorted = _.clone(res).sort(function(a,b){return a.test - b.test});
+
+        var sorted = res.sort(function(a,b) {
+          a = typeof a.test === 'undefined' ? null : a.test;
+          b = typeof b.test === 'undefined' ? null : b.test;
+          return a - b;
+        });
         res.should.eql(sorted);
         done();
       });
@@ -637,10 +871,27 @@ describe('mock tests', function () {
       crsr.should.have.property('sort');
       crsr.sort({test: -1}).toArray(function(err, res) {
         if (err) done(err);
-        var sorted = _.clone(res).sort(function(a,b){return b.test - a.test});
+
+        var sorted = res.sort(function(a,b) {
+          a = typeof a.test === 'undefined' ? null : a.test;
+          b = typeof b.test === 'undefined' ? null : b.test;
+          return b - a;
+        });
         res.should.eql(sorted);
         done();
       });
     });
+
+    it('should map results', function (done) {
+      var crsr = collection.find({});
+      crsr.should.have.property('map');
+      crsr.map(c => c.test).toArray(function(err, res) {
+        if (err) done(err);
+        var sampleTest = 333;
+        res.should.containEql(sampleTest);
+        done();
+      });
+    });
+
   });
 });
