@@ -21,9 +21,12 @@ describe('mock tests', function () {
     });
   });
   after(function(done) {
-    connected_db.close().then(done).catch(done)
+    connected_db.close().then(() => {
+      done();
+    }).catch((err) => {
+      done();
+    })
   });
-
 
   describe('databases', function() {
     it('should list collections', function(done) {
@@ -70,6 +73,24 @@ describe('mock tests', function () {
           });
         });
       });
+    });
+    it('should drop database', function (done) {
+      var dbName = 'db_to_drop';
+      var collectionName = 'testing';
+      var newDb = connected_db.db(dbName);
+      var newCollection = newDb.collection(collectionName);
+      newCollection.insertOne({_id: 'abc'})
+        .then(() => {
+          var data = newCollection.toJSON();
+          // Should have 1 doc in the collection
+          data.documents.should.have.length(1);
+
+          connected_db.dropDatabase(dbName);
+
+          // Should have no documents
+          should.not.exist(connected_db.db(dbName).collection(collectionName).toJSON().documents);
+          done();
+        });
     });
   });
 
@@ -573,7 +594,7 @@ describe('mock tests', function () {
       });
     });
     it('should push item into array that does not yet exist on the doc', function (done) {
-      collection.update({test:333}, { $push:{ newPushTest: {$each: [ 2 ]} }} ,function (err, result) {
+      collection.update({test:333}, { $push:{ newPushTest: {$each: [ 2 ]} }}, function (err, result) {
         if (err) done(err);
         result.n.should.equal(1);
         collection.findOne({test: 333}, function (err, doc) {
@@ -851,7 +872,7 @@ describe('mock tests', function () {
     });
 
     it('should sort results by `test` ascending', function (done) {
-      var crsr = collection.find({});
+      var crsr = collection.find({test: {$exists: true}});
       crsr.should.have.property('sort');
       crsr.sort({test: 1}).toArray(function(err, res) {
         if (err) done(err);
@@ -892,6 +913,5 @@ describe('mock tests', function () {
         done();
       });
     });
-
   });
 });
